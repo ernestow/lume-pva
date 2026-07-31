@@ -122,7 +122,7 @@ class Runner:
 
                 # Update PVs in simulator
                 self.runner._enqueue(
-                    {self.variable.name: {"value": op.value(), "ts": time.monotonic()}},
+                    {self.variable.name: {"value": op.value(), "ts": time.time()}},
                 )
                 pv.post(op.value())
                 LOG.debug(f"Setting PVA: {self.variable.name} -> {op.value()}")
@@ -184,7 +184,7 @@ class Runner:
                 self.callbackPV(reason)
 
             self.runner._enqueue(
-                {vn: {"value": nv, "ts": time.monotonic()}},
+                {vn: {"value": nv, "ts": time.time()}},
             )
 
             self.setParam(reason, value)
@@ -611,13 +611,13 @@ class Runner:
         for pv in self.snapshot_pvs:
             new_values[self.pv_to_var[pv]] = {
                 "value": self.pvua_context.get(pv),
-                "ts": time.monotonic(),
+                "ts": time.time(),
             }
         self._enqueue(new_values)
 
     def _monitor_callback(self, pvname, value, **kwargs):
         """Callback from p4p monitor updates"""
-        self._enqueue({self.pv_to_var[pvname]: {"value": value, "ts": time.monotonic()}})
+        self._enqueue({self.pv_to_var[pvname]: {"value": value, "ts": time.time()}})
 
     def _generate_value(self, pv: str, value: Any | None, ts: float | None = None) -> Value:
         """
@@ -638,7 +638,7 @@ class Runner:
         Helper to update timestamp on a value
         """
         if ts is None:
-            ts = time.monotonic()
+            ts = time.time()
         value["timeStamp"]["nanoseconds"] = math.fmod(ts, 1.0) * 1e9
         value["timeStamp"]["secondsPastEpoch"] = int(ts)
 
@@ -689,7 +689,7 @@ class Runner:
 
             # Use current time if we're missing a latest timestamp
             if latest_ts <= 0:
-                latest_ts = time.monotonic()
+                latest_ts = time.time()
 
             # Stash previous state
             settable_var_names = [
