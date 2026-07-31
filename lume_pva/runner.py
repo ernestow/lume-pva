@@ -13,7 +13,7 @@ import pcaspy
 import pcaspy.cas
 import pvua
 from lume.model import LUMEModel, Variable
-from lume.variables import ParticleGroupVariable
+from lume.variables import ConfigEnum, ParticleGroupVariable
 from p4p import Type, Value
 from p4p.client.thread import Subscription
 from p4p.nt import NTScalar
@@ -96,23 +96,37 @@ class Runner:
         model: LUMEModel
         variable: Variable
 
-        def __init__(self, variable: Variable, runner: "Runner", read_only: bool):
+        def __init__(
+            self, variable: Variable, handler: VariableHandler, runner: "Runner", read_only: bool
+        ):
             self.model = runner.model
             self.variable = variable
             self.runner = runner
             self.ro = read_only
+            self.handler = handler
 
         def put(self, pv: SharedPV, op: ServerOperation):
             if self.ro:
                 op.done(error="Read only PV")
             else:
+                # Validate values and reject bad ones
+                try:
+                    self.variable.validate_value(
+                        self.handler.unpack_value(self.variable, op.value()),
+                        config=ConfigEnum.ERROR,
+                    )
+                except Exception as e:
+                    LOG.warning(f"{self.variable.name}: Rejected invalid value: {e!s}")
+                    op.done(error=str(e))
+                    return
+
                 # Update PVs in simulator
                 self.runner._enqueue(
                     {self.variable.name: {"value": op.value(), "ts": time.monotonic()}},
-                    done=lambda error: op.done(error=error),
                 )
                 pv.post(op.value())
                 LOG.debug(f"Setting PVA: {self.variable.name} -> {op.value()}")
+                op.done()
 
         def rpc(self, op: ServerOperation):
             op.done()
@@ -166,9 +180,16 @@ class Runner:
                 self.setParam(reason, value)
                 self.callbackPV(reason)
 
+            # Validate values before updating the model
+            try:
+                var.validate_value(nv, ConfigEnum.ERROR)
+            except Exception as e:
+                # Doesn't seem to be a way to reject CA updates with an error message.
+                LOG.warning(f"{reason}: Rejected invalid value: {e!s}")
+                self.callbackPV(reason)
+
             self.runner._enqueue(
                 {vn: {"value": nv, "ts": time.monotonic()}},
-                done=lambda error: _complete_put(),
             )
             return True
 
@@ -383,7 +404,6 @@ class Runner:
     def _enqueue(
         self,
         values: dict[str, Any],
-        done: Callable[[str | None], None] | None = None,
         reset: bool = False,
     ) -> None:
         """
@@ -393,18 +413,12 @@ class Runner:
         ----------
         values : Dict[str, Any]
             Mapping of variable name -> {"value": ..., "ts": ...}
-        done : Callable[[str | None], None] | None
-            Optional completion callback. Invoked once the simulation that
-            consumes these values has finished (or failed). Receives an error
-            string on failure, or None on success. Used to defer signalling
-            put-completion to clients until results are actually available.
         reset : bool
             When true, request model.reset() before applying this batch.
         """
         self.queue.put(
             {
                 "values": values,
-                "done": [done] if done is not None else [],
                 "reset": reset,
             }
         )
@@ -431,7 +445,7 @@ class Runner:
         if self.supports_pva:
             LOG.debug(f"Creating PVA PV: pv={pv}")
             pvobj = SharedPV(
-                handler=Runner.Handler(variable=var, runner=self, read_only=ro),
+                handler=Runner.Handler(variable=var, runner=self, read_only=ro, handler=handler),
                 initial=self._generate_value(var.name, None),
             )
             self.pvs[var.name] = pvobj
@@ -644,7 +658,6 @@ class Runner:
             item = self.queue.get()
 
             value_data: dict = item["values"]
-            done_callbacks: list = item["done"]
             reset_requested: bool = item.get("reset", False)
 
             # Wait for a time window of 'update_rate' seconds to pass before continuing
@@ -653,7 +666,6 @@ class Runner:
                 try:
                     next_update = self.queue.get_nowait()
                     value_data.update(next_update["values"])
-                    done_callbacks.extend(next_update["done"])
                     reset_requested = reset_requested or next_update.get("reset", False)
                 except Empty:
                     pass
@@ -715,10 +727,7 @@ class Runner:
                     if k in self.subs:
                         continue
 
-                    # The model may return None for an output; there is nothing
-                    # meaningful to post, and passing it downstream would either
-                    # silently substitute the variable default (PVA path) or raise
-                    # in value_to_native (CA path). Skip and warn instead.
+                    # The model my return None for an output. Let's reject those updates.
                     if v is None:
                         LOG.warning(f"Model returned None for output '{k}'; skipping update")
                         continue
@@ -755,13 +764,6 @@ class Runner:
                 sim_error = str(exc)
                 LOG.error(f"Simulation Cycle Failed: ({sim_error}), resetting to cached value")
                 self._reset_to_cached_state()
-            finally:
-                # With simulation compoleted, signal put completion to any waitihng clients
-                for cb in done_callbacks:
-                    try:
-                        cb(sim_error)
-                    except Exception as excp:
-                        LOG.error(f"Error signalling put-completion: {excp}")
 
     def run(self):
         """
