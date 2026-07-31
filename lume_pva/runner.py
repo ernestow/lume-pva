@@ -175,11 +175,6 @@ class Runner:
                     return False
                 nv = desc["enums"][value]
 
-            # Insert into update queue
-            def _complete_put():
-                self.setParam(reason, value)
-                self.callbackPV(reason)
-
             # Validate values before updating the model
             try:
                 var.validate_value(nv, ConfigEnum.ERROR)
@@ -191,6 +186,10 @@ class Runner:
             self.runner._enqueue(
                 {vn: {"value": nv, "ts": time.monotonic()}},
             )
+
+            self.setParam(reason, value)
+            self.callbackPV(reason)
+
             return True
 
     def __init__(
